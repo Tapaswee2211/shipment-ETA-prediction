@@ -5,10 +5,10 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.model_selection import KFold
 
-from .generator import BASE, BASE_DOW, HOLIDAY_DAYS
+from .simulate_journey import BASE, BASE_DOW, HOLIDAYS
 
 H = pd.Timedelta(hours=1)
-_HOL = np.array(sorted(HOLIDAY_DAYS))
+_HOL = np.array(sorted(HOLIDAYS))
 
 STATIC_COLS = ["sched_transit_h", "slack_transit_h", "sched_port_h", "slack_port_h", "sched_inland_h",
                "slack_inland_h", "proc_nominal_h", "berth_window_h", "weather_exposure"]
