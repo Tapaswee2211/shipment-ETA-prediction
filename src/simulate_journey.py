@@ -156,11 +156,15 @@ def generate_dataset(n: int = N_SHIPMENTS, seed: int = SEED) -> pd.DataFrame:
         sim = propagate(p, r, u)
         phi, v0, vfull = true_shapley(p, r, u)
 
-        print("No-source delay:", v0)
-        print("Full delay:", vfull)
-        print("Sum of attributions:", phi.sum())
-        print("Efficiency error:", phi.sum() - (vfull - v0))
-        print("===========================================================")
+        if not np.isclose(phi.sum(), vfull - v0):
+            raise AssertionError(
+                f"Shapley efficiency failed for shipment "
+                f"on route {r['route_id']}"
+            )
+        if not np.isclose(vfull, sim["L3"]):
+            raise AssertionError(
+                "Full-source Shapley outcome does not match simulation"
+            )
 
         dep_s = dep_ts
         arr_s = dep_s + pd.Timedelta(hours=r["T1"])
