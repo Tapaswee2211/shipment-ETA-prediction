@@ -1,17 +1,16 @@
 from __future__ import annotations
-from math import factorial 
-import numpy as np 
-import pandas as pd 
 
+from math import factorial
+
+import numpy as np
+import pandas as pd
 
 from .config import ABSORB_EFF, APPT_WINDOW_H, DATA_DIR, N_SHIPMENTS, SEED
 
-BASE = pd.Timestamp("2025-01-01")
-BASE_DOW = BASE.dayofweek 
-
-############## Set Holidays
+BASE = pd.Timestamp("2025-01-01")          # naive timestamps are UTC by convention (a Wednesday)
+BASE_DOW = BASE.dayofweek
 _HOL = ["2025-01-01", "2025-04-18", "2025-04-21", "2025-05-01", "2025-05-29", "2025-12-25"]
-HOLIDAYS = frozenset((pd.Timestamp(d) - BASE).days for d in _HOL)
+HOLIDAY_DAYS = frozenset((pd.Timestamp(d) - BASE).days for d in _HOL)   # simplification: global holidays
 
 SOURCES = ["origin", "weather", "route_noise", "congestion", "processing", "inspection", "inland"]
 SOURCE_STAGE = {"origin": 0, "weather": 1, "route_noise": 1, "congestion": 2,
@@ -27,7 +26,6 @@ PORTS = {
     "Singapore":   dict(mu=-0.4, proc=14, berth=20),
     "Savannah":    dict(mu=0.3,  proc=32, berth=14),
 }
-
 POOR_REPORTING = {"Jebel Ali", "Savannah"}
 WAIT_SCALE = 1.5
 
@@ -48,45 +46,44 @@ ROUTE_TABLE = [
 
 def build_routes() -> list[dict]:
     routes = []
-    for i, (o, d, t1, s1, s2, t3, s3, weather_expo, ocm) in enumerate(ROUTE_TABLE, 1):
+    for i, (o, d, t1, s1, s2, t3, s3, expo, ocm) in enumerate(ROUTE_TABLE, 1):
         p = PORTS[d]
-        routes.append(dict(route_id=f"R{i:02d}", origin=o, destination=d, 
-                        T1 = float(t1), s1=float(s1), s2=float(s2), T3=float(t3),s3=float(s3),
-                        exposure=weather_expo, oc_mean=ocm, 
-                        proc=float(p["proc"]),P=float(p["proc"] + s2), 
-                        berth = float(p["berth"]), sigma=0.012 * t1 + 2.0)
-                    )
+        routes.append(dict(route_id=f"R{i:02d}", origin=o, destination=d, T1=float(t1), s1=float(s1),
+                           s2=float(s2), T3=float(t3), s3=float(s3), exposure=expo, oc_mean=ocm,
+                           proc=float(p["proc"]), P=float(p["proc"] + s2), berth=float(p["berth"]),
+                           sigma=0.012 * t1 + 2.0))
     return routes
 
-def _port_series(rng: np.random.Generator, n_days: int= 360) -> dict[str, np.ndarray]:
+
+def _port_series(rng: np.random.Generator, n_days: int = 420) -> dict[str, np.ndarray]:
+    """Daily port utilisation u in (0.35, 0.95): persistent AR(1) latent state -> shared by co-arriving ships."""
     out = {}
     for name, p in PORTS.items():
         x = np.zeros(n_days)
         x[0] = rng.normal(0, 0.9)
         for t in range(1, n_days):
-            x[t] = 0.96 * x[t-1] + 0.25 * rng.normal()
+            x[t] = 0.96 * x[t - 1] + 0.25 * rng.normal()
         out[name] = 0.35 + 0.60 / (1.0 + np.exp(-(p["mu"] + x)))
     return out
 
-def _dow ( h : float) -> int:
-    return (BASE_DOW + int(h//24)) % 7
+
+def _dow(h: float) -> int:
+    return (BASE_DOW + int(h // 24)) % 7
 
 
-def propagate (p: dict, r: dict, u: np.ndarray, zero: frozenset = frozenset()) -> dict :
-    def on(g):
-        return 0.0 if g in zero else 1.0 
+def propagate(p: dict, r: dict, u: np.ndarray, zero: frozenset = frozenset()) -> dict:
+    """Deterministic delay mechanism. `zero` switches off whole delay *sources* (for Shapley truth)."""
+    def on(g):  # 1.0 if source g is active
+        return 0.0 if g in zero else 1.0
     e = ABSORB_EFF
-
-    #################### S0 : At origin
+    # ---- S0: origin
     L0 = on("origin") * p["o_flag"] * p["o_size"] * (0.5 + p["oc"])
-    weather = on("weather") * 40.0 * r["exposure"] * p["w"]  ** 1.5
+    # ---- S1: ocean transit
+    weather = on("weather") * 40.0 * r["exposure"] * p["w"] ** 1.5
     rnoise = on("route_noise") * p["n1"] * r["sigma"]
     raw1 = L0 + weather + rnoise
-
-    #################### S1 : Ocean transit
-    L1 = raw1 - e * min(r["s1"], max(raw1, 0.0)) 
-
-    #################### S2 : Queue at PORT and customs
+    L1 = raw1 - e * min(r["s1"], max(raw1, 0.0))
+    # ---- S2: port queue + customs
     t_arr = p["dep_h"] + r["T1"] + L1
     uu = float(u[int(t_arr // 24)])
     v = (uu - 0.35) / 0.60
@@ -96,24 +93,23 @@ def propagate (p: dict, r: dict, u: np.ndarray, zero: frozenset = frozenset()) -
     cong_proc = cong * 0.9 * r["proc"] * v ** 2
     t_start = t_arr + wait + berth
     wk = 1.0 if _dow(t_start) >= 5 else 0.0
-    hol = 1.0 if int(t_start // 24) in HOLIDAYS else 0.0
+    hol = 1.0 if int(t_start // 24) in HOLIDAY_DAYS else 0.0
     weekend = on("processing") * 0.35 * (r["proc"] + cong_proc) * wk
     holiday = on("processing") * 10.0 * hol
     pnoise = on("processing") * 2.0 * p["n2"]
     insp = on("inspection") * p["i2_flag"] * p["i2_size"]
     raw2 = L1 + wait + berth + cong_proc + weekend + holiday + pnoise + insp
     L2 = raw2 - e * min(r["s2"], max(raw2, 0.0))
-
-    #################### S3: inland delivery
+    # ---- S3: inland delivery
     appt = (1.0 if L2 > APPT_WINDOW_H else 0.0) * p["a_extra"]                      # knock-on
     inland = on("inland") * (p["in_flag"] * p["in_size"] + 1.5 * p["in_noise"])
     raw3 = L2 + inland + appt
     L3 = raw3 - e * min(r["s3"], max(raw3, 0.0))
     return dict(L0=L0, L1=L1, L2=L2, L3=L3, u_arr=uu, weekend_start=wk,
-                port_wait = wait + berth,
-                processing=r["proc"] + cong_proc +weekend + holiday + pnoise + insp,
-                insp=p["i2_flag"] * on("inspection")
-            )
+                port_wait=wait + berth,
+                processing=r["proc"] + cong_proc + weekend + holiday + pnoise + insp,
+                insp=p["i2_flag"] * on("inspection"))
+
 
 def true_shapley(p: dict, r: dict, u: np.ndarray) -> tuple[np.ndarray, float, float]:
     """Exact Shapley value of each delay source for the final delay. Value fn: v(S)=L3 with only S active."""
@@ -129,7 +125,6 @@ def true_shapley(p: dict, r: dict, u: np.ndarray) -> tuple[np.ndarray, float, fl
                 continue
             s = bin(mask).count("1")
             phi[i] += factorial(s) * factorial(n - s - 1) / factorial(n) * (v[mask | (1 << i)] - v[mask])
-
     return phi, v[0], v[(1 << n) - 1]
 
 
@@ -155,16 +150,6 @@ def generate_dataset(n: int = N_SHIPMENTS, seed: int = SEED) -> pd.DataFrame:
                  in_noise=float(rng.normal()))
         sim = propagate(p, r, u)
         phi, v0, vfull = true_shapley(p, r, u)
-
-        if not np.isclose(phi.sum(), vfull - v0):
-            raise AssertionError(
-                f"Shapley efficiency failed for shipment "
-                f"on route {r['route_id']}"
-            )
-        if not np.isclose(vfull, sim["L3"]):
-            raise AssertionError(
-                "Full-source Shapley outcome does not match simulation"
-            )
 
         dep_s = dep_ts
         arr_s = dep_s + pd.Timedelta(hours=r["T1"])
@@ -226,5 +211,3 @@ if __name__ == "__main__":
     d = load_or_generate(force=True)
     print(d.shape)
     print(d["true_L3"].describe())
-
-

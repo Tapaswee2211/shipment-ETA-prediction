@@ -5,10 +5,10 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.model_selection import KFold
 
-from .simulate_journey import BASE, BASE_DOW, HOLIDAYS
+from .generator import BASE, BASE_DOW, HOLIDAY_DAYS
 
 H = pd.Timedelta(hours=1)
-_HOL = np.array(sorted(HOLIDAYS))
+_HOL = np.array(sorted(HOLIDAY_DAYS))
 
 STATIC_COLS = ["sched_transit_h", "slack_transit_h", "sched_port_h", "slack_port_h", "sched_inland_h",
                "slack_inland_h", "proc_nominal_h", "berth_window_h", "weather_exposure"]
@@ -217,4 +217,3 @@ def build_features(d: pd.DataFrame, cp: int) -> pd.DataFrame:
         X["appt_risk"] = d["L2"] - d["appt_window_h"]
         X["buffer_left_inland"] = d["slack_inland_h"] - np.maximum(d["L2"], 0)
     return X.astype(float)
-

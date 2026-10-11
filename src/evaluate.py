@@ -1,13 +1,3 @@
-"""
-Evaluation harness.
-
-Three split regimes (each answers a different question):
-  random  : 5-fold x R repeats           -> in-distribution accuracy
-  route   : leave-one-route-out          -> does it generalise to an unseen lane?
-  time    : expanding window + embargo   -> does it survive moving forward in time? (training shipments whose
-                                            delivery had not happened yet at test start are dropped)
-Everything learned (imputer, priors, models) is fitted inside the training part of each split.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -175,4 +165,3 @@ def run_missingness_sweep(df, levels=(0.0, 0.1, 0.2, 0.3, 0.45), seed=SEED) -> p
             for _, r in reg_metrics(oof, ["delay_gbm"]).iterrows():
                 rows.append(dict(extra_missing=q, imputation=mode, cp=int(r["cp"]), MAE=r["MAE"]))
     return pd.DataFrame(rows)
-

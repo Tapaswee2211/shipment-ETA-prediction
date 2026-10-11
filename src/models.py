@@ -18,15 +18,16 @@ from .features import (FEATURE_GROUP, INTERACTION_COLS, PROPAGATION_COLS, H, Lat
                        queue_factor)
 
 
-
 def _lgbm(seed, n_estimators=250, num_leaves=7, **kw):
     params = dict(learning_rate=0.04, min_child_samples=12, subsample=0.8, subsample_freq=1,
                   colsample_bytree=0.8, reg_lambda=2.0, random_state=seed, verbose=-1, n_jobs=1)
     params.update(kw)
     return lgb.LGBMRegressor(n_estimators=n_estimators, num_leaves=num_leaves, **params)
 
-############################################## Structured Chain Model ########################
 
+# =============================================================================
+# Structured chain model
+# =============================================================================
 def stage_X(j: int, d: pd.DataFrame, L: np.ndarray, forecast: bool) -> np.ndarray:
     """Inputs for the stage-j increment model, given lateness L entering the stage."""
     L = np.asarray(L, float)
@@ -117,7 +118,9 @@ class ChainModel:
         return L.reshape(n, K), incs
 
 
-############################ Checkpoint Predictor ####################################
+# =============================================================================
+# Checkpoint predictor
+# =============================================================================
 class ETAPredictor:
     def __init__(self, cp: int, seed: int = SEED, imputation: str = "model", interactions: bool = True,
                  propagation: bool = True, priors: bool = True, full: bool = True, n_draws: int = 200):
