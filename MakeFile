@@ -1,0 +1,12 @@
+.PHONY: install test all demo fast
+install:
+	pip install -r requirements.txt
+test:
+	python -m pytest -q
+all: test
+	python run_all.py
+fast:
+	python run_all.py --fast
+demo:
+	streamlit run app/demo.py
+
