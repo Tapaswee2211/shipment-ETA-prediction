@@ -1,0 +1,63 @@
+{
+  "n": 300,
+  "seed": 54,
+  "cv_repeats": 3,
+  "delay_threshold_h": 12.0,
+  "mae": {
+    "0": {
+      "sched": 12.73,
+      "carry": 11.581,
+      "route_prior": 13.243,
+      "ridge": 11.764,
+      "gbm": 12.514,
+      "chain": 11.83,
+      "chain_median": 10.823
+    },
+    "1": {
+      "sched": 12.73,
+      "carry": 10.905,
+      "route_prior": 13.243,
+      "ridge": 9.208,
+      "gbm": 8.951,
+      "chain": 8.631,
+      "chain_median": 7.744
+    },
+    "2": {
+      "sched": 12.73,
+      "carry": 4.667,
+      "route_prior": 13.243,
+      "ridge": 4.266,
+      "gbm": 3.984,
+      "chain": 3.427,
+      "chain_median": 3.376
+    }
+  },
+  "interval_coverage_80": {
+    "0": {
+      "gbm_quantile": 0.624,
+      "chain_monte_carlo": 0.809
+    },
+    "1": {
+      "gbm_quantile": 0.622,
+      "chain_monte_carlo": 0.801
+    },
+    "2": {
+      "gbm_quantile": 0.679,
+      "chain_monte_carlo": 0.733
+    }
+  },
+  "brier": {
+    "0": {
+      "gbm_classifier": 0.1883,
+      "chain_monte_carlo": 0.1883
+    },
+    "1": {
+      "gbm_classifier": 0.1511,
+      "chain_monte_carlo": 0.1358
+    },
+    "2": {
+      "gbm_classifier": 0.0539,
+      "chain_monte_carlo": 0.0532
+    }
+  }
+}

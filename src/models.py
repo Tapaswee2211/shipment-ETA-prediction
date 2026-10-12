@@ -4,7 +4,6 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.base import clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import RidgeCV
@@ -13,9 +12,17 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .config import APPT_WINDOW_H, DELAY_THRESHOLD_H, SEED
-from .features import (FEATURE_GROUP, INTERACTION_COLS, PROPAGATION_COLS, H, LatenessImputer, RoutePriors,
+from .features import (FEATURE_GROUP, INTERACTION_COLS, PROPAGATION_COLS, LatenessImputer, RoutePriors,
                        add_lateness, build_features, dow_from_hours, holiday_from_hours, hours_since_base,
                        queue_factor)
+
+
+class FeatureContractError(ValueError):
+    """The input row cannot be turned into the exact feature schema the model was trained on."""
+
+
+# observations that are legitimately absent whenever the customs record is missing
+NULLABLE_BY_DESIGN = {"port_wait_h", "processing_h", "proc_excess", "inspection_flag"}
 
 
 def _lgbm(seed, n_estimators=250, num_leaves=7, **kw):
@@ -49,8 +56,14 @@ class ChainModel:
     def __init__(self, seed: int = SEED, n_draws: int = 200):
         self.seed, self.n_draws = seed, n_draws
 
-    def _base(self):
-        return _lgbm(self.seed, n_estimators=150, num_leaves=5, min_child_samples=8)
+    # Domain prior: worse weather / a more congested port never *reduces* the delay added in that stage.
+    # Column order of stage_X: stage 1 = [L, slack, sched, w, w*exposure, exposure]
+    #                          stage 2 = [L, slack, proc, L-berth, queue, queue*proc, weekend, holiday, is_forecast]
+    MONOTONE = {1: [0, 0, 0, 1, 1, 0], 2: [0, 0, 0, 0, 1, 1, 0, 0, 0], 3: None}
+
+    def _base(self, j):
+        kw = {"monotone_constraints": self.MONOTONE[j]} if self.MONOTONE[j] else {}
+        return _lgbm(self.seed, n_estimators=150, num_leaves=5, min_child_samples=8, **kw)
 
     def fit(self, d: pd.DataFrame):
         o1 = (d["L1_missing"] == 0).to_numpy()
@@ -65,13 +78,13 @@ class ChainModel:
             XA = stage_X(j, dm, Lm, False)
             XB = stage_X(j, dm, Lm, True) if j == 2 else None
             if j == 2:
-                self.models[j] = self._base().fit(np.vstack([XA, XB]), np.r_[ym, ym])
+                self.models[j] = self._base(j).fit(np.vstack([XA, XB]), np.r_[ym, ym])
             else:
-                self.models[j] = self._base().fit(XA, ym)
+                self.models[j] = self._base(j).fit(XA, ym)
             # out-of-fold residuals (split by shipment so duplicated rows never straddle folds)
             oofA, oofB = np.zeros(len(ym)), np.zeros(len(ym))
             for tr, te in KFold(5, shuffle=True, random_state=self.seed).split(XA):
-                mdl = self._base()
+                mdl = self._base(j)
                 if j == 2:
                     mdl.fit(np.vstack([XA[tr], XB[tr]]), np.r_[ym[tr], ym[tr]])
                     oofB[te] = mdl.predict(XB[te])
@@ -86,32 +99,38 @@ class ChainModel:
 
     @staticmethod
     def _make_bank(res, routes):
-        bank = {"__all__": res}
+        """Sorted out-of-fold residuals: overall, plus per lane when a lane has >= 10 of them."""
+        bank = {"__all__": np.sort(res)}
         for r in np.unique(routes):
-            if (routes == r).sum() >= 10:                        # route-specific noise level when enough data
-                bank[r] = res[routes == r]
+            if (routes == r).sum() >= 10:
+                bank[r] = np.sort(res[routes == r])
         return bank
 
-    def _sample(self, key, routes, rng):
+    def _sample(self, key, routes, u):
+        """Residual = empirical quantile u of the lane's residual bank. Passing the *same* u to every row gives
+        common random numbers: two scenarios differ only because their inputs differ, never because of sampling
+        noise, and a row's prediction does not depend on which other rows are in the batch."""
         bank = self.bank[key]
         out = np.empty(len(routes))
         for r in np.unique(routes):
             idx = routes == r
-            out[idx] = rng.choice(bank.get(r, bank["__all__"]), size=idx.sum())
+            b = bank.get(r, bank["__all__"])
+            out[idx] = b[np.minimum((u[idx] * len(b)).astype(int), len(b) - 1)]
         return out
 
     def simulate(self, d: pd.DataFrame, cp: int, seed: int = 0):
         """Monte-Carlo the remaining stages. Returns (final-lateness draws [n,K], {stage: increment draws})."""
         rng = np.random.default_rng(seed)
         n, K = len(d), self.n_draws
-        dr = d.loc[d.index.repeat(K)].reset_index(drop=True)
+        dr = d.iloc[np.repeat(np.arange(n), K)].reset_index(drop=True)
         L = np.repeat(d[f"L{cp}"].to_numpy(float), K)
         routes = dr["route_id"].to_numpy()
         incs = {}
         for j in range(cp + 1, 4):
             forecast = cp < j - 1
             mu = self.models[j].predict(stage_X(j, dr, L, forecast))
-            res = self._sample((j, "fc" if (j == 2 and forecast) else "obs"), routes, rng)
+            u = np.tile(rng.random(K), n)                       # same K draws for every row (see _sample)
+            res = self._sample((j, "fc" if (j == 2 and forecast) else "obs"), routes, u)
             inc = mu + res
             incs[j] = inc.reshape(n, K)
             L = L + inc
@@ -155,9 +174,20 @@ class ETAPredictor:
             drop += ["L1_missing", "L2_missing"]
         X = X.drop(columns=[c for c in drop if c in X.columns])
         if fit:
+            # optional signals this dataset never provides are removed explicitly (not silently imputed)
+            self.dropped_all_nan = [c for c in X.columns if X[c].isna().all()]
+            X = X.drop(columns=self.dropped_all_nan)
             self.cols = list(X.columns)
+            self.required = [c for c in self.cols if c not in NULLABLE_BY_DESIGN and X[c].notna().all()]
             return X
-        return X.reindex(columns=self.cols)
+        missing = [c for c in self.cols if c not in X.columns]
+        if missing:
+            raise FeatureContractError(f"feature columns missing at checkpoint {self.cp}: {missing}")
+        X = X[self.cols]
+        bad = [c for c in self.required if X[c].isna().any()]
+        if bad:
+            raise FeatureContractError(f"required features are missing/NaN for this input (checkpoint {self.cp}): {bad}")
+        return X
 
     def fit(self, df: pd.DataFrame):
         d = self.prepare(df, fit=True)
@@ -179,12 +209,25 @@ class ETAPredictor:
         return self
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        """All outputs are *final delay in hours vs scheduled delivery* (ETA = delivery_sched_ts + delay)."""
+        """
+        Every ``delay_*`` / ``p10..p90`` / ``c10..c90`` column is the TOTAL final delay in hours versus the scheduled
+        delivery, i.e. it already contains the delay observed so far (L_k). Therefore
+            predicted ETA = delivery_sched_ts + delay        (never add L_k again)
+        and the remaining delay is  delay - L_k.  Models are trained on that remaining delay R_k = L_3 - L_k.
+          delay_chain         mean of the chain simulation        c10/c50/c90  its 10th/50th/90th percentiles
+          delay_chain_median  = c50, the point estimate shown in the app (lowest MAE in cross-validation)
+          p_delay_chain       share of simulated outcomes with final delay > DELAY_THRESHOLD_H
+          p_delay_clf         separate calibrated GBM classifier for the same event (cross-check)
+          chain_L0..chain_L3  mean cumulative lateness at each milestone (observed ones are the inputs)
+        """
         d = self.prepare(df)
         X = self._features(d)
         Lk = d[f"L{self.cp}"].to_numpy(float)
         out = pd.DataFrame(index=df.index)
         out["L_k"] = Lk
+        # bookkeeping: was an observed milestone (k <= checkpoint) missing and therefore estimated?
+        out["L1_imputed"] = d["L1_missing"].to_numpy(float) * (self.cp >= 1)
+        out["L2_imputed"] = d["L2_missing"].to_numpy(float) * (self.cp >= 2)
         out["delay_sched"] = 0.0
         out["delay_carry"] = Lk
         out["delay_route_prior"] = self.pri.transform(d)[:, 0]
@@ -197,10 +240,20 @@ class ETAPredictor:
             draws, incs = self.chain.simulate(d, self.cp, seed=self.seed)
             out["delay_chain"] = draws.mean(1)
             out["c10"], out["c50"], out["c90"] = np.percentile(draws, [10, 50, 90], axis=1)
+            out["delay_chain_median"] = out["c50"]
             out["p_delay_chain"] = (draws > DELAY_THRESHOLD_H).mean(1)
-            for j in range(self.cp + 1, 4):
+            for k in range(self.cp + 1):                       # milestones already observed
+                out[f"chain_L{k}"] = d[f"L{k}"].to_numpy(float)
+            cur = Lk.copy()
+            for j in range(self.cp + 1, 4):                    # expected cumulative lateness at future milestones
+                cur = cur + incs[j].mean(1)
+                out[f"chain_L{j}"] = cur
                 out[f"chain_inc_s{j}"] = incs[j].mean(1)
         return out
+
+    def feature_row(self, df: pd.DataFrame) -> pd.DataFrame:
+        """The exact feature matrix the tree/linear models receive for these rows (validated against the contract)."""
+        return self._features(self.prepare(df))
 
     # ---- explanation hooks ----
     def shap_features(self, df: pd.DataFrame):

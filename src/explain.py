@@ -29,48 +29,69 @@ def stage_attribution(pred, df: pd.DataFrame) -> pd.DataFrame:
     return A
 
 
-def validate_attribution(attr_oof: pd.DataFrame) -> pd.DataFrame:
-    """attr_oof: columns cp, S0..S3, true_phi_stage0..3, true_L3 (out-of-fold). Spearman per stage per checkpoint."""
+def validate_attribution(attr_oof: pd.DataFrame, prefix: str = "S") -> pd.DataFrame:
+    """attr_oof: columns cp, <prefix>0..3, true_phi_stage0..3, true_L3 (out-of-fold). Spearman per stage per checkpoint.
+    prefix "S" = GBM/SHAP stage attribution, "B" = chain-model stage breakdown."""
     rows = []
     for cp, g in attr_oof.groupby("cp"):
         for k in range(4):
-            a, t = g[f"S{k}"].to_numpy(), g[f"true_phi_stage{k}"].to_numpy()
+            a, t = g[f"{prefix}{k}"].to_numpy(), g[f"true_phi_stage{k}"].to_numpy()
             rho = spearmanr(a, t).statistic if np.std(a) > 1e-9 else np.nan
             rows.append(dict(cp=cp, stage=STAGE_NAMES[k], spearman=rho))
         dl = g[g["true_L3"] > DELAY_THRESHOLD_H]
-        pa = dl[[f"S{k}" for k in range(4)]].to_numpy().argmax(1)
+        pa = dl[[f"{prefix}{k}" for k in range(4)]].to_numpy().argmax(1)
         pt = dl[[f"true_phi_stage{k}" for k in range(4)]].to_numpy().argmax(1)
         rows.append(dict(cp=cp, stage="top-stage agreement (delayed shipments)", spearman=float((pa == pt).mean())))
     return pd.DataFrame(rows)
 
 
-def what_if(pred, df_row: pd.DataFrame, congestion: float | None = None, weather: float | None = None):
-    d2 = df_row.copy()
-    if congestion is not None:
-        d2["dest_congestion_dep"] = congestion
-        d2["dest_congestion_arr"] = congestion
-    if weather is not None:
-        d2["weather_fcst"] = weather
-        d2["weather_actual"] = weather
-    return pred.predict(d2)
-
-
-def narrate(pred, row: pd.DataFrame, normal_congestion: float | None = None) -> str:
-    """Human-readable explanation of one shipment's prediction."""
-    out = pred.predict(row).iloc[0]
-    A = stage_attribution(pred, row).iloc[0]
-    g, base, _ = pred.shap_groups(row)
-    g = g.iloc[0]
-    lines = [f"Predicted final delay: {out['delay_gbm']:+.1f} h"
-             + (f"  (P10 {out['p10']:+.1f} / P90 {out['p90']:+.1f} h; P(delay>{DELAY_THRESHOLD_H:.0f}h)="
-                f"{out['p_delay_clf']:.0%})" if "p10" in out else "")]
+def stage_breakdown(out: pd.Series, cp: int) -> pd.DataFrame:
+    """Per-stage change in lateness, from the chain model's milestone lateness (chain_L0..chain_L3).
+    delta_k = chain_L_k - chain_L_(k-1) with chain_L_(-1) = 0, so the deltas sum to the chain's mean final delay.
+    Negative = schedule buffer recovered time.  status: observed | estimated (a missing timestamp was imputed) |
+    expected (stage not reached yet; mean of the simulation)."""
+    L = [float(out[f"chain_L{k}"]) for k in range(4)]
+    est1, est2 = bool(out.get("L1_imputed", 0)) and cp >= 1, bool(out.get("L2_imputed", 0)) and cp >= 2
+    rows, prev = [], 0.0
     for k in range(4):
-        lines.append(f"  {STAGE_NAMES[k]:<16} {A[f'S{k}']:+6.1f} h")
-    lines.append(f"  {'baseline/propagation':<16} {A['other']:+6.1f} h")
-    top = g.abs().sort_values(ascending=False).head(3).index
-    lines.append("Top model drivers: " + ", ".join(f"{GROUP_LABELS[t]} ({g[t]:+.1f} h)" for t in top))
-    if normal_congestion is not None:
-        cf = what_if(pred, row, congestion=normal_congestion).iloc[0]["delay_gbm"]
-        lines.append(f"Counterfactual: with normal congestion ({normal_congestion:.2f}) delay would be "
-                     f"{cf:+.1f} h ({cf - out['delay_gbm']:+.1f} h).")
-    return "\n".join(lines)
+        if k > cp:
+            status = "expected"
+        elif (k == 1 and est1) or (k == 2 and (est1 or est2)):
+            status = "estimated"
+        else:
+            status = "observed"
+        rows.append(dict(stage=STAGE_NAMES[k], delta_h=L[k] - prev, status=status))
+        prev = L[k]
+    return pd.DataFrame(rows)
+
+
+def explain_text(out: pd.Series, bd: pd.DataFrame, cp: int, threshold_h: float, counterfactual: dict | None = None) -> list:
+    """Plain-language bullets that only restate model outputs."""
+    med, lo, hi = out["delay_chain_median"], out["c10"], out["c90"]
+    when = lambda h: f"{abs(h):.1f} h {'late' if h > 0 else 'early'}"
+    lines = [f"The median estimate is **{when(med)}** against the scheduled delivery; 80% of simulated outcomes "
+             f"fall between {lo:+.1f} h and {hi:+.1f} h."]
+    obs = bd[bd.status != "expected"]
+    if cp == 0:
+        lines.append(f"So far: the shipment departed {when(float(out['L_k']))}.")
+    else:
+        parts = ", ".join(f"{r.stage.lower()} {r.delta_h:+.1f} h" for r in obs.itertuples())
+        lines.append(f"So far: {float(out['L_k']):+.1f} h accumulated ({parts}).")
+        if (obs.status == "estimated").any():
+            lines.append("A milestone timestamp was missing, so that part is estimated by the model.")
+    fut = bd[bd.status == "expected"]
+    if len(fut):
+        top = fut.sort_values("delta_h", ascending=False).iloc[0]
+        if top.delta_h > 0.5:
+            lines.append(f"Most of the delay still to come is expected in **{top.stage.lower()}** "
+                         f"({top.delta_h:+.1f} h on average).")
+        else:
+            lines.append("Little additional delay is expected in the remaining stages.")
+    rec = obs[(obs.delta_h < -1.0) & (obs.stage != STAGE_NAMES[0])]
+    for r in rec.itertuples():
+        lines.append(f"Schedule buffer recovered about {abs(r.delta_h):.1f} h during {r.stage.lower()}.")
+    if counterfactual:
+        lines.append(f"What-if: {counterfactual['label']} would move the median by {counterfactual['delta_h']:+.1f} h.")
+    lines.append(f"Estimated probability of arriving more than {threshold_h:g} h late: **{out['p_delay_chain']:.0%}** "
+                 "(share of simulated outcomes).")
+    return lines

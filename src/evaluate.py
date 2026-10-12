@@ -10,7 +10,8 @@ from .explain import stage_attribution
 from .features import add_lateness
 from .models import ETAPredictor
 
-REG_MODELS = ["delay_sched", "delay_carry", "delay_route_prior", "delay_ridge", "delay_gbm", "delay_chain"]
+REG_MODELS = ["delay_sched", "delay_carry", "delay_route_prior", "delay_ridge", "delay_gbm", "delay_chain",
+              "delay_chain_median"]
 
 
 def splits(df: pd.DataFrame, kind: str, seed: int = SEED, n_repeats: int = 3):
@@ -51,8 +52,11 @@ def run_cv(df, kind="random", cps=CHECKPOINTS, full=True, attribution=False, see
                 A = stage_attribution(P, dte)
                 for c in A:
                     out[c] = A[c].to_numpy()
+                for k in range(4):                              # chain-model stage breakdown (what the app shows)
+                    out[f"B{k}"] = out[f"chain_L{k}"] - (out[f"chain_L{k - 1}"] if k else 0.0)
                 for k in range(4):
-                    out[f"true_phi_stage{k}"] = dte[f"true_phi_stage{k}"].to_numpy()
+                    if f"true_phi_stage{k}" in dte:            # ground truth only exists for synthetic data
+                        out[f"true_phi_stage{k}"] = dte[f"true_phi_stage{k}"].to_numpy()
             rows.append(out)
     return pd.concat(rows, ignore_index=True)
 

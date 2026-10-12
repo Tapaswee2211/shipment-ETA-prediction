@@ -10,6 +10,12 @@ from .generator import BASE, BASE_DOW, HOLIDAY_DAYS
 H = pd.Timedelta(hours=1)
 _HOL = np.array(sorted(HOLIDAY_DAYS))
 
+
+def set_holidays(dates) -> None:
+    """Replace the holiday calendar (list of date strings). Needed for real data from other years/countries."""
+    global _HOL
+    _HOL = np.array(sorted((pd.Timestamp(d) - BASE).days for d in dates), dtype=int)
+
 STATIC_COLS = ["sched_transit_h", "slack_transit_h", "sched_port_h", "slack_port_h", "sched_inland_h",
                "slack_inland_h", "proc_nominal_h", "berth_window_h", "weather_exposure"]
 
