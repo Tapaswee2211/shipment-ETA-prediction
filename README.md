@@ -145,7 +145,7 @@ Other measured results (seed 42):
 
 ## Tests
 
-`python -m pytest -q` runs 67 tests with warnings treated as errors (`pytest.ini`): deterministic generation, stage/Shapley
+`PYTHONPATH="" python -m pytest -q` runs 67 tests with warnings treated as errors (`pytest.ini`): deterministic generation, stage/Shapley
 identities, no future information (masked vs unmasked rows give identical features and predictions), prediction semantics
 (observed delay added once, breakdown sums to the chain mean), batch-independence of predictions, split integrity, input
 validation, new-shipment ≡ existing-shipment equivalence, what-if validity per checkpoint, and Streamlit `AppTest` smoke tests.

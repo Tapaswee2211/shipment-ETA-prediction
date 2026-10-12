@@ -66,9 +66,9 @@ def test_whatif_changes_prediction_in_the_expected_direction(held, cp, kind):
     _, row, models = held
     r = as_of(row, cp)
     s = sweep(models[cp], r, kind, np.linspace(0.35 if kind == "congestion" else 0.0, 0.95 if kind == "congestion" else 1.0, 7))
-    assert s["median"].iloc[-1] > s["median"].iloc[0] + 1.0               # worse conditions -> later arrival
-    assert s["median"].corr(pd.Series(s["x"]), method="spearman") > 0.9    # increases with the condition (small wiggles allowed)
-    pd.testing.assert_frame_equal(s, sweep(models[cp], r, kind, s["x"]))   # deterministic: no sampling noise
+    assert s["median"].iloc[-1] > s["median"].iloc[0] + 1.0               
+    assert s["median"].corr(pd.Series(s["x"]), method="spearman") > 0.9    
+    pd.testing.assert_frame_equal(s, sweep(models[cp], r, kind, s["x"]))  
 
 
 def test_whatif_at_current_value_reproduces_the_headline(held):

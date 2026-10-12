@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.simulate_journey import (
+from src.generator import (
     build_routes,
     _port_series,
     generate_dataset,
